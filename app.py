@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 API_KEY = os.getenv("GROQ_API_KEY")
 
-# Constants for local storage
+# --- Constants for local storage ---
 SUBJECTS_DIR = "subjects"
 METADATA_FILENAME = "metadata.json"
 AGG_OUTPUT_FILENAME = "aggregated_output.json"
@@ -29,9 +29,9 @@ def create_subject(subject_name):
     subject_path = os.path.join(SUBJECTS_DIR, subject_name)
     if not os.path.exists(subject_path):
         os.makedirs(subject_path)
-        # Initialize metadata for subject
-        save_metadata(subject, {})
-        save_aggregated_outputs(subject, {})
+        # Fix: use subject_name instead of undefined variable
+        save_metadata(subject_name, {})  
+        save_aggregated_outputs(subject_name, {})
     return subject_path
 
 def get_metadata_path(subject):
@@ -141,8 +141,7 @@ def generate_structured_quiz(text, api_key):
         'and "explanation": <a brief explanation of why the answer is correct>.\n'
         f"{text[:2000]}"
     )
-    response_text = call_groq_api(prompt, api_key)
-    # Extract JSON substring if extraneous characters exist
+    response_text = call_groq_api(prompt, API_KEY)
     json_start = response_text.find('[')
     json_end = response_text.rfind(']')
     if json_start != -1 and json_end != -1:
@@ -169,17 +168,6 @@ def generate_chat_response(context_text, user_question, api_key):
     prompt = f"Based on the following context:\n{context_text[:2000]}\nAnswer this question:\n{user_question}"
     return call_groq_api(prompt, api_key)
 
-# --- Helper for Caching/Regenerating Outputs ---
-def get_or_generate_output(key, generator_func, context_text, api_key, force_regen=False):
-    # key: unique identifier in metadata (or aggregated metadata)
-    # Returns previously stored output if exists and not forced to regenerate
-    output = st.session_state.get(key)
-    if not force_regen and output:
-        return output
-    new_output = generator_func(context_text, api_key)
-    st.session_state[key] = new_output
-    return new_output
-
 # --- Main Application ---
 def main():
     st.title("EduScribe: Lecture Summarizer, QnA & Chatbot")
@@ -193,7 +181,7 @@ def main():
         if new_subject.strip():
             create_subject(new_subject.strip())
             st.sidebar.success(f"Created subject: {new_subject.strip()}")
-            st.experimental_rerun()
+            st.rerun()  # Refresh to load new subject
         else:
             st.sidebar.warning("Enter a valid subject name.")
     
@@ -211,7 +199,7 @@ def main():
             else:
                 extracted_text = ""
             metadata = load_metadata(selected_subject)
-            # To reduce metadata size, store only a truncated summary (or generate summary)
+            # Store only a concise summary in metadata to reduce clutter
             if "summary" not in metadata.get(uploaded_subject_file.name, {}):
                 summary = generate_summary(extracted_text, API_KEY)
             else:
@@ -219,7 +207,7 @@ def main():
             metadata[uploaded_subject_file.name] = {
                 "filepath": file_path,
                 "extracted_text": extracted_text,
-                "summary": summary  # store only summary (can add FAQ, quiz etc later)
+                "summary": summary
             }
             save_metadata(selected_subject, metadata)
             st.sidebar.success(f"Saved {uploaded_subject_file.name} to {selected_subject}")
@@ -239,7 +227,7 @@ def main():
             aggregated_text = "\n".join([data.get("summary", "") for data in metadata.values() if data.get("summary")])
             st.subheader("Folder Aggregated Outputs")
             
-            # Generate and display Aggregated Summary (stored in aggregated outputs)
+            # Aggregated Summary
             agg_outputs = load_aggregated_outputs(selected_subject)
             if st.button("Generate Aggregated Summary for Folder"):
                 summary = generate_summary(aggregated_text, API_KEY)
@@ -249,6 +237,7 @@ def main():
                 st.markdown("**Folder Summary:**")
                 st.write(agg_outputs["summary"])
             
+            # Aggregated FAQs
             if st.button("Generate FAQs for Folder"):
                 faq = generate_faq(aggregated_text, API_KEY)
                 agg_outputs["faq"] = faq
@@ -257,6 +246,7 @@ def main():
                 st.markdown("**Folder FAQs:**")
                 st.write(agg_outputs["faq"])
             
+            # Aggregated Practice Questions
             if st.button("Generate Practice Questions for Folder"):
                 practice = generate_practice_questions(aggregated_text, API_KEY)
                 agg_outputs["practice"] = practice
@@ -265,7 +255,7 @@ def main():
                 st.markdown("**Folder Practice Questions:**")
                 st.write(agg_outputs["practice"])
             
-            # Aggregated Interactive Quiz with regeneration and persistent state
+            # Aggregated Interactive Quiz with regeneration and persistence
             if st.button("Generate Interactive Quiz for Folder") or "folder_quiz" in st.session_state:
                 if st.button("Regenerate Folder Quiz"):
                     st.session_state.folder_quiz = generate_structured_quiz(aggregated_text, API_KEY)
@@ -299,7 +289,7 @@ def main():
                             if user_choice == correct_full:
                                 score += 1
                         st.success(f"Folder Quiz Score: {score} out of {len(folder_quiz)}")
-                        # Display explanations for each question
+                        # Show explanations for each question
                         for idx, q in enumerate(folder_quiz):
                             st.markdown(f"**Q{idx+1} Explanation:** {q.get('explanation', 'No explanation provided')}")
             
@@ -310,7 +300,6 @@ def main():
                 file_data = metadata.get(selected_file, {})
                 st.write(f"**File: {selected_file}**")
                 st.write(file_data.get("extracted_text", "")[:500] + "...")
-                # File-level outputs with regeneration options:
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button("Generate Summary for File"):
@@ -337,6 +326,7 @@ def main():
                     save_metadata(selected_subject, metadata)
                     st.markdown("**File Practice Questions:**")
                     st.write(file_practice)
+                # File-level Interactive Quiz with regeneration and persistence
                 if st.button("Generate Interactive Quiz for File") or "file_quiz" in st.session_state:
                     if st.button("Regenerate File Quiz"):
                         st.session_state.file_quiz = generate_structured_quiz(file_data.get("extracted_text", ""), API_KEY)
@@ -433,7 +423,6 @@ def main():
                 st.info("Select a subject folder for chat.")
             else:
                 metadata = load_metadata(selected_subject)
-                # Use aggregated summaries if available; otherwise, aggregate full summaries
                 aggregated_context = "\n".join([data.get("summary", "") for data in metadata.values() if data.get("summary")])
                 if not aggregated_context:
                     aggregated_context = "\n".join([data.get("extracted_text", "")[:1000] for data in metadata.values()])
