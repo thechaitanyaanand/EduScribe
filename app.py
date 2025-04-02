@@ -186,15 +186,15 @@ def call_groq_api(prompt, api_key):
         return f"Error {response.status_code}: {response.text}"
 
 def generate_summary(text, api_key):
-    prompt = f"Summarize the following content concisely:\n{text[:10000]}"
+    prompt = f"You are an intelligent educational assistant designed to help students understand complex content by summarizing it into clear, concise, and engaging explanations. Your task is to read the provided content and create a summary that highlights the most important concepts, definitions, examples, and takeaways. The summary should be structured in an easily digestible format—use bullet points or numbered lists when it enhances clarity. Aim for a tone that is formal yet conversational, and feel free to include clever humor where it aids comprehension without compromising professionalism. Ensure that the summary is tailored for a student audience, making the material accessible and reinforcing key learning objectives. If any part of the content is ambiguous, offer a brief explanation or ask clarifying questions to ensure accuracy:\n{text[:10000]}"
     return call_groq_api(prompt, api_key)
 
 def generate_faq(text, api_key):
-    prompt = f"Generate 5 FAQs with answers based on the following content:\n{text[:10000]}"
+    prompt = f"You are an educational assistant with a knack for breaking down complex material into digestible pieces. Your task is to review the provided content and generate a list of 5 frequently asked questions (FAQs) along with detailed, yet succinct answers. Ensure that each FAQ is directly relevant to the content, addresses common points of confusion, and reinforces key concepts. Present your answers in a clear, structured format, using bullet points or numbered lists as needed. Feel free to add a touch of clever humor to keep the tone light, but maintain a formal and professional style that would help a student truly grasp the subject matter:\n{text[:10000]}"
     return call_groq_api(prompt, api_key)
 
 def generate_practice_questions(text, api_key):
-    prompt = f"Generate 5 practice questions with answers based on the following content:\n{text[:10000]}"
+    prompt = f"You are an expert educational guide tasked with reinforcing learning through practice. Using the provided content, generate 5 well-crafted practice questions along with their corresponding answers. The questions should cover a broad range of the key concepts and details from the content, challenging the student in a way that promotes deeper understanding. Structure your output in an organized manner—each question followed immediately by its answer, using lists or clear separations. Aim to be both informative and engaging, using a touch of clever humor where appropriate, while ensuring that your tone remains formal and professional:\n{text[:10000]}"
     return call_groq_api(prompt, api_key)
 
 def generate_structured_quiz(text, api_key):
@@ -230,12 +230,12 @@ def normalize_answer(q):
     return ans
 
 def generate_chat_response(context_text, user_question, api_key):
-    prompt = f"Based on the following context:\n{context_text[:10000]}\nAnswer this question:\n{user_question}"
+    prompt = f"You are a knowledgeable educational assistant here to help decode complex information. Based on the following context:\n{context_text[:10000]}\nplease provide a clear, concise, and accurate answer to the question below. Your response should break down the essential points and incorporate relevant examples or explanations that enhance understanding. Structure your answer for clarity and use a formal, professional tone with occasional clever humor to keep the content engaging for a student audience:\n{user_question}"
     return call_groq_api(prompt, api_key)
 
 # --- Main Application ---
 def main():
-    st.title("EduScribe Enhanced: Lecture Summarizer, QnA & Chatbot with Embeddings")
+    st.title("EduScribe V1.3")
     
     # Sidebar: Subject Management
     st.sidebar.header("Subject Management")
