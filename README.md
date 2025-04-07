@@ -2,6 +2,9 @@
 
 EduScribe RAG is an interactive web application that leverages Retrieval-Augmented Generation (RAG) techniques to help students and educators process and study large volumes of educational material. It extracts text from PDFs and text files (even entire books), uses hierarchical summarization and document chunking to reduce input tokens while enhancing output quality, and stores metadata persistently using SQLite. Additionally, EduScribe RAG integrates FAISS for efficient vector retrieval and offers a SERP API–powered web search feature to discover relevant study resources (books, videos, courses). A chat interface further allows users to ask context-specific questions based on aggregated folder or file content.
 
+# Demo Video Link:
+- https://drive.google.com/drive/folders/1Ybb6Xm1L4NXcylg_-XsigLxJV6t8MwOl?usp=drive_link
+
 ## Features
 
 - **Subject Folder Management & Persistence:**
