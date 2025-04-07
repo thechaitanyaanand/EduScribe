@@ -1,21 +1,26 @@
 import os
 import json
 import sqlite3
-import faiss
 import numpy as np
+import faiss
 import requests
 import pdfplumber
 import streamlit as st
 from dotenv import load_dotenv
-import torch
-torch._C._jit_set_profiling_executor(False)
 from sentence_transformers import SentenceTransformer
+import torch
 
-# Load API key from .env file
+# Disable JIT profiling executor to avoid event-loop issues
+torch._C._jit_set_profiling_executor(False)
+
+# Load environment variables
 load_dotenv()
 API_KEY = os.getenv("GROQ_API_KEY")
+SERP_API_KEY = os.getenv("SERP_API_KEY")
 
-# --- Database Setup (SQLite) ---
+#############################################
+# Database & Local Storage Setup (SQLite)
+#############################################
 DB_PATH = "metadata.db"
 
 def init_db():
@@ -27,57 +32,74 @@ def init_db():
                     filename TEXT,
                     extracted_text TEXT,
                     summary TEXT,
-                    embedding TEXT
+                    chunks TEXT
                 )''')
+    # Ensure "chunks" column exists (for legacy databases)
+    c.execute("PRAGMA table_info(files)")
+    columns = [col[1] for col in c.fetchall()]
+    if "chunks" not in columns:
+        c.execute("ALTER TABLE files ADD COLUMN chunks TEXT")
     conn.commit()
     conn.close()
 
 init_db()
 
-def save_file_metadata(subject, filename, extracted_text, summary, embedding):
+def save_file_metadata(subject, filename, extracted_text, summary, chunks):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    embedding_str = json.dumps(embedding.tolist())  # Store embedding as JSON string
-    c.execute('''INSERT INTO files (subject, filename, extracted_text, summary, embedding)
-                 VALUES (?, ?, ?, ?, ?)''', (subject, filename, extracted_text, summary, embedding_str))
+    chunks_str = json.dumps(chunks) if chunks else json.dumps([])
+    c.execute('''INSERT INTO files (subject, filename, extracted_text, summary, chunks)
+                 VALUES (?, ?, ?, ?, ?)''', (subject, filename, extracted_text, summary, chunks_str))
     conn.commit()
     conn.close()
 
 def load_files_by_subject(subject):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT filename, extracted_text, summary, embedding FROM files WHERE subject=?", (subject,))
+    c.execute("SELECT filename, extracted_text, summary, chunks FROM files WHERE subject=?", (subject,))
     rows = c.fetchall()
     conn.close()
     files = {}
     for row in rows:
-        filename, extracted_text, summary, embedding_str = row
+        filename, extracted_text, summary, chunks_str = row
         files[filename] = {
             "extracted_text": extracted_text,
             "summary": summary,
-            "embedding": json.loads(embedding_str)
+            "chunks": json.loads(chunks_str)
         }
     return files
 
-# --- FAISS Index Setup ---
-INDEX_PATH = "faiss.index"
+#############################################
+# FAISS Global Index Setup (for all chunks)
+#############################################
 embedding_dim = 384  # for "all-MiniLM-L6-v2"
+INDEX_PATH = "faiss.index"
 
 if os.path.exists(INDEX_PATH):
     index = faiss.read_index(INDEX_PATH)
+    if os.path.exists("faiss_mapping.json"):
+        with open("faiss_mapping.json", "r", encoding="utf-8") as f:
+            faiss_mapping = json.load(f)
+    else:
+        faiss_mapping = []
 else:
     index = faiss.IndexFlatL2(embedding_dim)
+    faiss_mapping = []
 
-def update_faiss_index(embedding):
+def update_faiss_index(embedding, meta):
     vec = np.array([embedding]).astype('float32')
     index.add(vec)
+    faiss_mapping.append(meta)
     faiss.write_index(index, INDEX_PATH)
+    with open("faiss_mapping.json", "w", encoding="utf-8") as f:
+        json.dump(faiss_mapping, f, indent=2)
 
-# --- Embedding Model & Caching ---
+#############################################
+# Embedding Model & Caching
+#############################################
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
-
 
 model = load_embedding_model()
 
@@ -85,11 +107,32 @@ model = load_embedding_model()
 def compute_embedding(text):
     return model.encode([text])[0]
 
+#############################################
+# Document Chunking for Hierarchical Summarization
+#############################################
+def split_text(text, chunk_size=3000, overlap=200):
+    chunks = []
+    start = 0
+    while start < len(text):
+        end = start + chunk_size
+        chunks.append(text[start:end])
+        start += (chunk_size - overlap)
+    return chunks
 
-# --- Folder and File Management ---
+def hierarchical_summary(text, api_key, chunk_size=3000, overlap=200):
+    chunks = split_text(text, chunk_size=chunk_size, overlap=overlap)
+    chunk_summaries = []
+    for chunk in chunks:
+        chunk_sum = generate_summary(chunk, api_key)
+        chunk_summaries.append(chunk_sum)
+    combined_summary = "\n".join(chunk_summaries)
+    final_summary = generate_summary(combined_summary, api_key)
+    return final_summary
+
+#############################################
+# Folder and File Management (Local)
+#############################################
 SUBJECTS_DIR = "subjects"
-METADATA_FILENAME = "metadata.json"
-AGG_OUTPUT_FILENAME = "aggregated_output.json"
 
 def ensure_subjects_dir():
     if not os.path.exists(SUBJECTS_DIR):
@@ -106,42 +149,6 @@ def create_subject(subject_name):
         os.makedirs(subject_path)
     return subject_path
 
-def get_metadata_path(subject):
-    return os.path.join(SUBJECTS_DIR, subject, METADATA_FILENAME)
-
-def load_metadata(subject):
-    meta_path = get_metadata_path(subject)
-    if os.path.exists(meta_path):
-        with open(meta_path, "r", encoding="utf-8") as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError:
-                return {}
-    return {}
-
-def save_metadata(subject, metadata):
-    meta_path = get_metadata_path(subject)
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2)
-
-def get_agg_output_path(subject):
-    return os.path.join(SUBJECTS_DIR, subject, AGG_OUTPUT_FILENAME)
-
-def load_aggregated_outputs(subject):
-    agg_path = get_agg_output_path(subject)
-    if os.path.exists(agg_path):
-        with open(agg_path, "r", encoding="utf-8") as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError:
-                return {}
-    return {}
-
-def save_aggregated_outputs(subject, agg_output):
-    agg_path = get_agg_output_path(subject)
-    with open(agg_path, "w", encoding="utf-8") as f:
-        json.dump(agg_output, f, indent=2)
-
 def save_file_to_subject(subject, uploaded_file):
     subject_path = os.path.join(SUBJECTS_DIR, subject)
     if not os.path.exists(subject_path):
@@ -151,7 +158,9 @@ def save_file_to_subject(subject, uploaded_file):
         f.write(uploaded_file.getbuffer())
     return file_path
 
-# --- File Text Extraction Functions ---
+#############################################
+# File Text Extraction Functions
+#############################################
 def extract_text_from_pdf(file_input):
     text = ""
     with pdfplumber.open(file_input) as pdf:
@@ -173,11 +182,50 @@ def extract_text(uploaded_file):
     else:
         return ""
 
-# --- API Call Functions ---
-def call_groq_api(prompt, api_key):
+#############################################
+# SERP API Web Search Functions
+#############################################
+def perform_serp_search(query):
+    params = {
+        "q": query,
+        "engine": "google",
+        "api_key": SERP_API_KEY,
+        "hl": "en",
+        "gl": "us"
+    }
+    response = requests.get("https://serpapi.com/search", params=params)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        return {"error": response.text}
+
+def search_study_resources(query):
+    results = perform_serp_search(query)
+    items = []
+    if "organic_results" in results:
+        for item in results["organic_results"]:
+            title = item.get("title", "No Title")
+            link = item.get("link", "")
+            snippet = item.get("snippet", "")
+            items.append({"title": title, "link": link, "snippet": snippet})
+    return items
+
+# New function: Generate a search query from context using Groq API
+def generate_search_query(context, api_key):
+    prompt = f"Based on the following educational context:\n{context[:3000]}\nGenerate a concise search query to find the most relevant study resources (books, videos, courses) for this content."
+    return call_groq_api(prompt, api_key)
+
+#############################################
+# API Call Functions for Groq (with max_tokens)
+#############################################
+def call_groq_api(prompt, api_key, max_tokens=2000):
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
-    data = {"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}]}
+    data = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens
+    }
     response = requests.post(url, headers=headers, json=data)
     if response.status_code == 200:
         result = response.json()
@@ -186,15 +234,15 @@ def call_groq_api(prompt, api_key):
         return f"Error {response.status_code}: {response.text}"
 
 def generate_summary(text, api_key):
-    prompt = f"You are an intelligent educational assistant designed to help students understand complex content by summarizing it into clear, concise, and engaging explanations. Your task is to read the provided content and create a summary that highlights the most important concepts, definitions, examples, and takeaways. The summary should be structured in an easily digestible format—use bullet points or numbered lists when it enhances clarity. Aim for a tone that is formal yet conversational, and feel free to include clever humor where it aids comprehension without compromising professionalism. Ensure that the summary is tailored for a student audience, making the material accessible and reinforcing key learning objectives. If any part of the content is ambiguous, offer a brief explanation or ask clarifying questions to ensure accuracy:\n{text[:10000]}"
+    prompt = f"You are an intelligent educational assistant designed to help students understand complex content by summarizing it into clear, concise, and engaging explanations. Your task is to read the provided content and create a summary that highlights the most important concepts, definitions, examples, and takeaways. The summary should be structured in an easily digestible format—use bullet points or numbered lists when it enhances clarity. Aim for a tone that is formal yet conversational, and feel free to include clever humor where it aids comprehension without compromising professionalism. Ensure that the summary is tailored for a student audience, making the material accessible and reinforcing key learning objectives. If any part of the content is ambiguous, offer a brief explanation or ask clarifying questions to ensure accuracy:\n{text[:3000]}"
     return call_groq_api(prompt, api_key)
 
 def generate_faq(text, api_key):
-    prompt = f"You are an educational assistant with a knack for breaking down complex material into digestible pieces. Your task is to review the provided content and generate a list of 5 frequently asked questions (FAQs) along with detailed, yet succinct answers. Ensure that each FAQ is directly relevant to the content, addresses common points of confusion, and reinforces key concepts. Present your answers in a clear, structured format, using bullet points or numbered lists as needed. Feel free to add a touch of clever humor to keep the tone light, but maintain a formal and professional style that would help a student truly grasp the subject matter:\n{text[:10000]}"
+    prompt = f"You are an educational assistant with a knack for breaking down complex material into digestible pieces. Your task is to review the provided content and generate a list of 5 frequently asked questions (FAQs) along with detailed, yet succinct answers. Ensure that each FAQ is directly relevant to the content, addresses common points of confusion, and reinforces key concepts. Present your answers in a clear, structured format, using bullet points or numbered lists as needed. Feel free to add a touch of clever humor to keep the tone light, but maintain a formal and professional style that would help a student truly grasp the subject matter:\n{text[:3000]}"
     return call_groq_api(prompt, api_key)
 
 def generate_practice_questions(text, api_key):
-    prompt = f"You are an expert educational guide tasked with reinforcing learning through practice. Using the provided content, generate 5 well-crafted practice questions along with their corresponding answers. The questions should cover a broad range of the key concepts and details from the content, challenging the student in a way that promotes deeper understanding. Structure your output in an organized manner—each question followed immediately by its answer, using lists or clear separations. Aim to be both informative and engaging, using a touch of clever humor where appropriate, while ensuring that your tone remains formal and professional:\n{text[:10000]}"
+    prompt = f"You are an expert educational guide tasked with reinforcing learning through practice. Using the provided content, generate 5 well-crafted practice questions along with their corresponding answers. The questions should cover a broad range of the key concepts and details from the content, challenging the student in a way that promotes deeper understanding. Structure your output in an organized manner—each question followed immediately by its answer, using lists or clear separations. Aim to be both informative and engaging, using a touch of clever humor where appropriate, while ensuring that your tone remains formal and professional:\n{text[:3000]}"
     return call_groq_api(prompt, api_key)
 
 def generate_structured_quiz(text, api_key):
@@ -204,7 +252,7 @@ def generate_structured_quiz(text, api_key):
         '"question": <string>, "options": [<option A>, <option B>, <option C>, <option D>], '
         '"answer": <the letter of the correct option (A, B, C, or D) or the full text>, '
         'and "explanation": <a brief explanation of why the answer is correct>.\n'
-        f"{text[:10000]}"
+        f"{text[:3000]}"
     )
     response_text = call_groq_api(prompt, API_KEY)
     json_start = response_text.find('[')
@@ -230,12 +278,14 @@ def normalize_answer(q):
     return ans
 
 def generate_chat_response(context_text, user_question, api_key):
-    prompt = f"You are a knowledgeable educational assistant here to help decode complex information. Based on the following context:\n{context_text[:10000]}\nplease provide a clear, concise, and accurate answer to the question below. Your response should break down the essential points and incorporate relevant examples or explanations that enhance understanding. Structure your answer for clarity and use a formal, professional tone with occasional clever humor to keep the content engaging for a student audience:\n{user_question}"
+    prompt = f"Based on the following context:\n{context_text[:3000]}\nAnswer the question below clearly and concisely:\n{user_question}"
     return call_groq_api(prompt, api_key)
 
-# --- Main Application ---
+#############################################
+# Main Application
+#############################################
 def main():
-    st.title("EduScribe V1.3")
+    st.title("EduScribe RAG: Lecture Summarizer, QnA, and Resource Finder")
     
     # Sidebar: Subject Management
     st.sidebar.header("Subject Management")
@@ -250,26 +300,41 @@ def main():
         else:
             st.sidebar.warning("Enter a valid subject name.")
     
-    # Sidebar: Upload File to Subject
+    # Sidebar: Upload File to Subject (with ingestion/chunking)
     st.sidebar.subheader("Upload File to Subject")
     if selected_subject != "--None--":
         uploaded_subject_file = st.sidebar.file_uploader("Upload file for subject", key="subject_upload")
         if uploaded_subject_file:
             extracted_text = extract_text(uploaded_subject_file)
-            summary = generate_summary(extracted_text, API_KEY)
-            embedding = compute_embedding(summary)
+            # Use hierarchical summarization if text is long
+            if len(extracted_text) > 5000:
+                summary = hierarchical_summary(extracted_text, API_KEY)
+            else:
+                summary = generate_summary(extracted_text, API_KEY)
+            # Ingest document to get chunks for retrieval
+            chunks = []
+            if len(extracted_text) > 5000:
+                chunk_texts = split_text(extracted_text, chunk_size=2000, overlap=300)
+                for ct in chunk_texts:
+                    emb = compute_embedding(ct)
+                    chunks.append({"text": ct, "embedding": emb.tolist()})
+            else:
+                emb = compute_embedding(extracted_text)
+                chunks.append({"text": extracted_text, "embedding": emb.tolist()})
             subject_folder = os.path.join(SUBJECTS_DIR, selected_subject)
             file_path = os.path.join(subject_folder, uploaded_subject_file.name)
             with open(file_path, "wb") as f:
                 f.write(uploaded_subject_file.getbuffer())
-            save_file_metadata(selected_subject, uploaded_subject_file.name, extracted_text, summary, embedding)
-            update_faiss_index(embedding)
+            save_file_metadata(selected_subject, uploaded_subject_file.name, extracted_text, summary, chunks)
+            # Update global FAISS index with each chunk embedding
+            for idx, chunk in enumerate(chunks):
+                update_faiss_index(np.array(chunk["embedding"], dtype="float32"), {"subject": selected_subject, "filename": uploaded_subject_file.name, "chunk_index": idx})
             st.sidebar.success(f"Saved {uploaded_subject_file.name} to {selected_subject}")
     else:
         st.sidebar.info("Select or create a subject to upload files.")
     
     # Main Tab Selection
-    tab = st.radio("Choose Operation", ["Folder Operations", "File Operations", "Chat"])
+    tab = st.radio("Choose Operation", ["Folder Operations", "File Operations", "Chat", "Web Search"])
     
     if tab == "Folder Operations":
         if selected_subject == "--None--":
@@ -476,6 +541,54 @@ def main():
                     answer = generate_chat_response(file_text, user_question, API_KEY)
                     st.markdown("**Answer:**")
                     st.write(answer)
+    
+    elif tab == "Web Search":
+        st.header("Study Resource Web Search")
+        # Provide a choice for context source
+        context_source = st.selectbox("Select Context Source", ["Manual Query", "Use Subject Context", "Use Uploaded File Context"])
+        if context_source == "Manual Query":
+            search_query = st.text_input("Enter your search query for study resources:", key="web_search")
+        elif context_source == "Use Subject Context":
+            if selected_subject == "--None--":
+                st.info("Select a subject for context-based web search.")
+                search_query = ""
+            else:
+                files_metadata = load_files_by_subject(selected_subject)
+                aggregated_context = "\n".join([data.get("summary", "") for data in files_metadata.values() if data.get("summary")])
+                if not aggregated_context:
+                    aggregated_context = "\n".join([data.get("extracted_text", "")[:1000] for data in files_metadata.values()])
+                st.write("Using aggregated subject context.")
+                search_query = generate_search_query(aggregated_context, API_KEY)
+                st.write("Generated Search Query:", search_query)
+        elif context_source == "Use Uploaded File Context":
+            uploaded_file_search = st.file_uploader("Upload a file for search context", key="search_file")
+            if uploaded_file_search:
+                file_ext = uploaded_file_search.name.split('.')[-1].lower()
+                if file_ext == "pdf":
+                    file_text = extract_text_from_pdf(uploaded_file_search)
+                elif file_ext == "txt":
+                    file_text = extract_text_from_txt(uploaded_file_search)
+                else:
+                    file_text = ""
+                st.write("Using uploaded file context.")
+                search_query = generate_search_query(file_text, API_KEY)
+                st.write("Generated Search Query:", search_query)
+            else:
+                search_query = ""
+        if search_query:
+            if st.button("Search Web"):
+                results = search_study_resources(search_query)
+                if "error" in results:
+                    st.error("Web search error: " + results["error"])
+                else:
+                    st.markdown("### Search Results")
+                    for item in results:
+                        st.markdown(f"**[{item.get('title')}]({item.get('link')})**")
+                        st.write(item.get("snippet"))
+
+def generate_search_query(context, api_key):
+    prompt = f"Based on the following educational context:\n{context[:3000]}\nGenerate a concise search query to find the most relevant study resources, including helpful books, online courses, and videos."
+    return call_groq_api(prompt, api_key)
 
 if __name__ == "__main__":
     main()
