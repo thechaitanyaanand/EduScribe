@@ -210,9 +210,9 @@ def search_study_resources(query):
             items.append({"title": title, "link": link, "snippet": snippet})
     return items
 
-# New function: Generate a search query from context using Groq API
+# Generate a search query from educational context using the Groq API
 def generate_search_query(context, api_key):
-    prompt = f"Based on the following educational context:\n{context[:3000]}\nGenerate a concise search query to find the most relevant study resources (books, videos, courses) for this content."
+    prompt = f"Based on the following educational context:\n{context[:3000]}\nGenerate a concise search query to find the most relevant study resources, including books, courses, and videos."
     return call_groq_api(prompt, api_key)
 
 #############################################
@@ -285,7 +285,7 @@ def generate_chat_response(context_text, user_question, api_key):
 # Main Application
 #############################################
 def main():
-    st.title("EduScribe RAG: Lecture Summarizer, QnA, and Resource Finder")
+    st.title("EduScribe: Lecture Summarizer, QnA & Resource Finder")
     
     # Sidebar: Subject Management
     st.sidebar.header("Subject Management")
@@ -343,6 +343,9 @@ def main():
             st.header(f"Subject: {selected_subject}")
             files_metadata = load_files_by_subject(selected_subject)
             aggregated_text = "\n".join([data.get("summary", "") for data in files_metadata.values() if data.get("summary")])
+            # Fallback to extracted text if no summary exists
+            if not aggregated_text.strip():
+                aggregated_text = "\n".join([data.get("extracted_text", "")[:3000] for data in files_metadata.values()])
             st.subheader("Folder Aggregated Outputs")
             
             if st.button("Generate Aggregated Summary for Folder"):
@@ -398,6 +401,24 @@ def main():
                     st.success(f"Folder Quiz Score: {score} out of {len(folder_quiz)}")
                     for idx, q in enumerate(folder_quiz):
                         st.markdown(f"**Q{idx+1} Explanation:** {q.get('explanation', 'No explanation provided')}")
+            
+            st.subheader("Search Study Resources (Folder Context)")
+            # Use aggregated context from folder
+            folder_context = aggregated_text.strip()
+            if folder_context:
+                folder_search_query = generate_search_query(folder_context, API_KEY)
+                st.write("Generated Search Query:", folder_search_query)
+                if st.button("Search Web for Folder Resources"):
+                    results = search_study_resources(folder_search_query)
+                    if "error" in results:
+                        st.error("Web search error: " + results["error"])
+                    else:
+                        st.markdown("### Search Results")
+                        for item in results:
+                            st.markdown(f"**[{item.get('title')}]({item.get('link')})**")
+                            st.write(item.get("snippet"))
+            else:
+                st.warning("Folder context is empty. Generate folder summaries first.")
             
             st.subheader("Files in Subject")
             file_list = list(files_metadata.keys())
@@ -458,6 +479,23 @@ def main():
                         st.success(f"File Quiz Score: {score} out of {len(file_quiz)}")
                         for idx, q in enumerate(file_quiz):
                             st.markdown(f"**Q{idx+1} Explanation:** {q.get('explanation', 'No explanation provided')}")
+                
+                st.subheader("Search Study Resources (File Context)")
+                file_context = file_data.get("summary", "") or file_data.get("extracted_text", "")[:3000]
+                if file_context.strip():
+                    file_search_query = generate_search_query(file_context, API_KEY)
+                    st.write("Generated Search Query:", file_search_query)
+                    if st.button("Search Web for File Resources"):
+                        results = search_study_resources(file_search_query)
+                        if "error" in results:
+                            st.error("Web search error: " + results["error"])
+                        else:
+                            st.markdown("### Search Results")
+                            for item in results:
+                                st.markdown(f"**[{item.get('title')}]({item.get('link')})**")
+                                st.write(item.get("snippet"))
+                else:
+                    st.warning("File context is empty. Generate file summary first.")
     
     elif tab == "File Operations":
         st.header("Direct File Upload and Processing")
@@ -507,6 +545,19 @@ def main():
                     st.success(f"Uploaded File Quiz Score: {score} out of {len(up_quiz)}")
                     for idx, q in enumerate(up_quiz):
                         st.markdown(f"**Q{idx+1} Explanation:** {q.get('explanation', 'No explanation provided')}")
+                
+                st.subheader("Search Study Resources (Uploaded File Context)")
+                file_search_query = generate_search_query(lecture_text, API_KEY)
+                st.write("Generated Search Query:", file_search_query)
+                if st.button("Search Web for Uploaded File Resources"):
+                    results = search_study_resources(file_search_query)
+                    if "error" in results:
+                        st.error("Web search error: " + results["error"])
+                    else:
+                        st.markdown("### Search Results")
+                        for item in results:
+                            st.markdown(f"**[{item.get('title')}]({item.get('link')})**")
+                            st.write(item.get("snippet"))
     
     elif tab == "Chat":
         st.header("Chat with Document Assistant")
@@ -544,51 +595,17 @@ def main():
     
     elif tab == "Web Search":
         st.header("Study Resource Web Search")
-        # Provide a choice for context source
-        context_source = st.selectbox("Select Context Source", ["Manual Query", "Use Subject Context", "Use Uploaded File Context"])
-        if context_source == "Manual Query":
-            search_query = st.text_input("Enter your search query for study resources:", key="web_search")
-        elif context_source == "Use Subject Context":
-            if selected_subject == "--None--":
-                st.info("Select a subject for context-based web search.")
-                search_query = ""
+        # Standalone Web Search tab (manual query)
+        search_query = st.text_input("Enter your search query for study resources:", key="web_search")
+        if search_query and st.button("Search Web"):
+            results = search_study_resources(search_query)
+            if "error" in results:
+                st.error("Web search error: " + results["error"])
             else:
-                files_metadata = load_files_by_subject(selected_subject)
-                aggregated_context = "\n".join([data.get("summary", "") for data in files_metadata.values() if data.get("summary")])
-                if not aggregated_context:
-                    aggregated_context = "\n".join([data.get("extracted_text", "")[:1000] for data in files_metadata.values()])
-                st.write("Using aggregated subject context.")
-                search_query = generate_search_query(aggregated_context, API_KEY)
-                st.write("Generated Search Query:", search_query)
-        elif context_source == "Use Uploaded File Context":
-            uploaded_file_search = st.file_uploader("Upload a file for search context", key="search_file")
-            if uploaded_file_search:
-                file_ext = uploaded_file_search.name.split('.')[-1].lower()
-                if file_ext == "pdf":
-                    file_text = extract_text_from_pdf(uploaded_file_search)
-                elif file_ext == "txt":
-                    file_text = extract_text_from_txt(uploaded_file_search)
-                else:
-                    file_text = ""
-                st.write("Using uploaded file context.")
-                search_query = generate_search_query(file_text, API_KEY)
-                st.write("Generated Search Query:", search_query)
-            else:
-                search_query = ""
-        if search_query:
-            if st.button("Search Web"):
-                results = search_study_resources(search_query)
-                if "error" in results:
-                    st.error("Web search error: " + results["error"])
-                else:
-                    st.markdown("### Search Results")
-                    for item in results:
-                        st.markdown(f"**[{item.get('title')}]({item.get('link')})**")
-                        st.write(item.get("snippet"))
-
-def generate_search_query(context, api_key):
-    prompt = f"Based on the following educational context:\n{context[:3000]}\nGenerate a concise search query to find the most relevant study resources, including helpful books, online courses, and videos."
-    return call_groq_api(prompt, api_key)
+                st.markdown("### Search Results")
+                for item in results:
+                    st.markdown(f"**[{item.get('title')}]({item.get('link')})**")
+                    st.write(item.get("snippet"))
 
 if __name__ == "__main__":
     main()
