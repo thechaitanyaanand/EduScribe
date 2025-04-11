@@ -63,7 +63,7 @@ EduScribe RAG is an interactive web application that leverages Retrieval-Augment
 1. **Clone the Repository:**
 
    ```bash
-   git clone https://github.com/yourusername/eduscribe.git
+   git clone https://github.com/thechaitanyaanand/eduscribe.git
    cd eduscribe
    ```
 
